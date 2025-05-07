@@ -17,6 +17,7 @@ The guide includes diagrams, YAML examples, troubleshooting tips, and best pract
 - [Kubernetes Architecture](#kubernetes-architecture-1)
 - [Advanced Workload Management](#advanced-workload-management)
 - [Kubernetes Networking](#kubernetes-networking)
+  - [Kubernetes Traffic Routing Flow](#kubernetes-traffic-routing-flow)
 - [Storage Management](#storage-management)
 - [Security](#security)
 - [Advanced Scheduling](#advanced-scheduling)
@@ -1636,6 +1637,76 @@ Kubernetes networking follows four fundamental requirements:
 - **NodePort**: Exposes the Service on each Node's IP at a static port
 - **LoadBalancer**: Exposes the Service externally using a cloud provider's load balancer
 - **ExternalName**: Maps a Service to a DNS name
+
+### Kubernetes Traffic Routing Flow
+
+#### Key Concept
+Even if many Pods listen on the same port (e.g., port 80), Kubernetes routes traffic based on Pod IP addresses. Port 80 can be reused across Pods because each Pod has a unique network namespace and IP address.
+
+#### Standard Kubernetes Routing Flow
+
+```
+Client (Browser/API Request) → Ingress Controller → Service (ClusterIP) → Pods (unique IPs)
+```
+
+Here's the detailed flow:
+
+1. Client sends request to Ingress (port 80/443)
+2. Ingress routes by host/path to appropriate Service (e.g., ClusterIP 10.96.0.5:80)
+3. Service load balances to backend Pods:
+   - Pod A (10.244.0.12:80)
+   - Pod B (10.244.0.23:80)
+   - Pod C (10.244.0.47:80)
+4. Each Pod has its own IP address but can use the same port (80)
+
+#### Key Benefits of This Architecture
+
+1. **Scalability**: Add more Pods listening on the same port without conflicts
+2. **Flexibility**: Replace Pods without changing the Service endpoint
+3. **Load Balancing**: Distribute traffic across multiple Pod replicas
+4. **Service Discovery**: Clients only need to know the Service name, not individual Pods
+
+#### Cilium-Enhanced Routing Flow (with eBPF)
+
+```
+Client → Ingress → Service → Cilium eBPF → Pods
+```
+
+With Cilium, the key difference is:
+
+1. Client sends request to Ingress (port 80/443)
+2. Ingress routes by host/path to appropriate Service
+3. **Cilium eBPF intercepts the traffic** (bypassing kube-proxy)
+4. Cilium load balances directly to Pods:
+   - Pod A (10.244.0.12:80)
+   - Pod B (10.244.0.23:80)
+   - Pod C (10.244.0.47:80)
+5. eBPF programs in the Linux kernel handle the routing for higher performance
+
+#### What Changes with Cilium
+
+* **No iptables/IPVS** → Cilium uses eBPF programs attached to the Linux kernel.
+* Cilium intercepts traffic before kube-proxy would.
+* Faster routing, lower latency, better observability (via Hubble).
+
+**Result**:
+```
+Client → Ingress → Service → Cilium eBPF → Pod
+```
+
+Pod IPs and port 80 are still used for routing, but the data plane is now eBPF, not iptables.
+
+#### Routing Components Summary
+
+| Component | Purpose |
+|-----------|---------|
+| **Pods** | Each gets a unique IP; can all use port 80 without conflict |
+| **Service** | Creates a stable virtual IP and load balances to Pods |
+| **Ingress** | Provides HTTP/HTTPS routing based on hostnames and paths |
+| **kube-proxy (default)** | Uses iptables or IPVS for routing |
+| **Cilium (eBPF)** | Replaces kube-proxy, handles routing/load balancing at the kernel level |
+
+**Why this works**: Kubernetes separates IP space (unique per Pod) from port numbers (which can repeat). With Cilium, this gets even faster and smarter thanks to eBPF.
 
 ### Common Issues
 - **Pod Failures**: CrashLoopBackOff, ImagePullBackOff, Error, Pending
